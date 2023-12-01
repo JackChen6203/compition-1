@@ -1,4 +1,6 @@
 import pandas as pd
+from datetime import datetime
+import numpy as np
 
 # # 資料來源
 df1 = pd.read_csv("data1.csv", low_memory=False)
@@ -8,66 +10,237 @@ df3 = pd.read_csv("data3.csv", low_memory=False)
 # # 合併資料
 combined_df = pd.concat([df1, df2, df3])
 
-# 轉換日期格式
-combined_df["review_end_time"] = pd.to_datetime(combined_df["review_end_time"])
-combined_df["review_start_time"] = pd.to_datetime(combined_df["review_start_time"])
 
-# 創建 new_df 並選取所需欄位，去除重複
-new_df = combined_df.drop_duplicates(subset="PseudoID")[
+# 將Excel日期轉換為Python datetime
+def excel_date_to_datetime(excel_date_str):
+    try:
+        # 假設日期已是 yyyy/mm/dd hh:mm:ss 格式的字符串
+        return pd.to_datetime(excel_date_str)
+    except ValueError:
+        # 如果轉換失敗，則處理為Excel數字格式的日期
+        excel_date_num = float(excel_date_str)
+        return pd.to_datetime("1899-12-30") + pd.to_timedelta(excel_date_num, "D")
+
+
+# 轉換 review_end_time 和 review_start_time
+combined_df["review_end_time"] = combined_df["review_end_time"].apply(
+    excel_date_to_datetime
+)
+combined_df["review_start_time"] = combined_df["review_start_time"].apply(
+    excel_date_to_datetime
+)
+# 轉換 review_end_time 和 review_start_time
+combined_df["review_end_time"] = combined_df["review_end_time"].apply(
+    excel_date_to_datetime
+)
+combined_df["review_start_time"] = combined_df["review_start_time"].apply(
+    excel_date_to_datetime
+)
+
+# 建立 new_df 並選擇欄位
+new_df = combined_df[
     ["PseudoID", "city_code", "organization_id", "grade", "class", "month"]
-].reset_index(drop=True)
+].drop_duplicates(subset=["PseudoID"])
 
-# 計算影片觀看數量
-video_count = (
-    combined_df.groupby("PseudoID")["video_item_sn"].nunique().rename("影片觀看數量")
-)
-new_df = new_df.join(video_count, on="PseudoID")
+# 計算 total_video_watched
+video_count = combined_df.groupby("PseudoID")["video_item_sn"].nunique().reset_index()
+video_count.columns = ["PseudoID", "total_video_watched"]
+new_df = new_df.merge(video_count, on="PseudoID", how="left")
 
-# 計算影片瀏覽次數
-review_count = combined_df.groupby("PseudoID")["review_sn"].nunique().rename("影片瀏覽次數")
-new_df = new_df.join(review_count, on="PseudoID")
+# 計算 total_reviewed_count
+review_count = combined_df.groupby("PseudoID")["review_sn"].nunique().reset_index()
+review_count.columns = ["PseudoID", "total_reviewed_count"]
+new_df = new_df.merge(review_count, on="PseudoID", how="left")
 
-# 計算平均影片完成率
-avg_finish_rate = (
-    combined_df.drop_duplicates("review_sn")
+# 計算 avg_finished_rate
+finished_rate = (
+    combined_df.drop_duplicates(subset=["review_sn"])
     .groupby("PseudoID")["review_finish_rate"]
+    .sum()
+    .reset_index()
+)
+finished_rate.columns = ["PseudoID", "sum_finished_rate"]
+new_df = new_df.merge(finished_rate, on="PseudoID", how="left")
+new_df["avg_finished_rate"] = (
+    new_df["sum_finished_rate"] / new_df["total_reviewed_count"]
+)
+new_df.drop(columns=["sum_finished_rate"], inplace=True)
+
+# 計算 total_review_time
+combined_df["review_time"] = (
+    combined_df["review_end_time"] - combined_df["review_start_time"]
+).dt.total_seconds()
+review_time = (
+    combined_df.drop_duplicates(subset=["review_sn"])
+    .groupby("PseudoID")["review_time"]
+    .sum()
+    .reset_index()
+)
+review_time.columns = ["PseudoID", "total_review_time"]
+new_df = new_df.merge(review_time, on="PseudoID", how="left")
+
+# 計算 avg_video_watch_time 和 avg_video_review_time
+new_df["avg_video_watch_time"] = (
+    new_df["total_review_time"] / new_df["total_video_watched"]
+)
+new_df["avg_video_review_time"] = (
+    new_df["total_review_time"] / new_df["total_reviewed_count"]
+)
+
+# 其餘程式碼維持不變...
+
+# 計算 avg_prac_ratio
+prac_ratio = (
+    combined_df.drop_duplicates(subset=["prac_sn"])
+    .groupby("PseudoID")["prac_score_rate"]
     .mean()
-    .rename("平均影片完成率")
+    .reset_index()
 )
-new_df = new_df.join(avg_finish_rate, on="PseudoID")
+prac_ratio.columns = ["PseudoID", "avg_prac_ratio"]
+prac_ratio["avg_prac_ratio"] = prac_ratio["avg_prac_ratio"] / 100
+new_df = new_df.merge(prac_ratio, on="PseudoID", how="left")
+new_df["avg_prac_ratio"].fillna(0, inplace=True)
 
-
-# 計算影片瀏覽總時間
-def total_seconds(series):
-    return series.dt.total_seconds()
-
-
-watch_time_total = (
-    combined_df.drop_duplicates("review_sn")
-    .groupby("PseudoID")
-    .apply(lambda x: total_seconds(x["review_end_time"] - x["review_start_time"]).sum())
-    .rename("影片瀏覽總時間")
+# 計算 total_prac_cost_time
+prac_cost_time = (
+    combined_df.drop_duplicates(subset=["prac_sn"])
+    .groupby("PseudoID")["prac_during_time"]
+    .sum()
+    .reset_index()
 )
-new_df = new_df.join(watch_time_total, on="PseudoID")
+prac_cost_time.columns = ["PseudoID", "total_prac_cost_time"]
+new_df = new_df.merge(prac_cost_time, on="PseudoID", how="left")
+new_df["total_prac_cost_time"].fillna(0, inplace=True)
 
-# 計算平均觀看影片時間
-new_df["平均觀看影片時間"] = new_df["影片瀏覽總時間"] / new_df["影片觀看數量"]
 
-# 計算平均影片瀏覽時間
-new_df["平均影片瀏覽時間"] = new_df["影片瀏覽總時間"] / new_df["影片瀏覽次數"]
+# 計算 total_prac_counts
+# 计算 total_prac_counts 的函数
+def extract_prac_questions_count(prac_questions_str):
+    # 确保 prac_questions_str 不是 NaN
+    if pd.isna(prac_questions_str):
+        return 0
+    else:
+        # 将所有元素转换为字符串，然后分割
+        prac_questions = set(prac_questions_str.split("@XX@"))
+        # 移除空字符串
+        prac_questions.discard("")
+        return len(prac_questions)
 
-# ...（继续之前的代码）
 
-# 确保所有新计算的栏位，空白结果以0表示
-new_df["avg_prac_ratio"] = new_df["avg_prac_ratio"].fillna(0)
-new_df["total_prac_cost_time"] = new_df["total_prac_cost_time"].fillna(0)
-new_df["total_prac_counts"] = new_df["total_prac_counts"].fillna(0)
-new_df["avg_prac_time"] = new_df["avg_prac_time"].fillna(0)
-new_df["total_check_ans_counts"] = new_df["total_check_ans_counts"].fillna(0)
-new_df["total_check_ans_time"] = new_df["total_check_ans_time"].fillna(0)
-new_df["total_check_ans_result"] = new_df["total_check_ans_result"].fillna(0)
-new_df["check_correct_ratio"] = new_df["check_correct_ratio"].fillna(0)
+# 计算 total_prac_counts
+prac_counts = (
+    combined_df.groupby("PseudoID")["prac_questions"]
+    .apply(
+        lambda x: extract_prac_questions_count(
+            "@XX@".join(x.dropna().astype(str).unique())
+        )
+    )
+    .reset_index()
+)
+prac_counts.columns = ["PseudoID", "total_prac_counts"]
+new_df = new_df.merge(prac_counts, on="PseudoID", how="left")
+
+
+# 計算 avg_prac_time
+new_df["avg_prac_time"] = new_df["total_prac_cost_time"] / new_df["total_prac_counts"]
+new_df["avg_prac_time"].fillna(0, inplace=True)
+
+# 計算 total_check_ans_counts
+check_ans_counts = (
+    combined_df.drop_duplicates(subset=["exam_video_exam_sn"])
+    .groupby("PseudoID")["exam_video_exam_sn"]
+    .count()
+    .reset_index()
+)
+check_ans_counts.columns = ["PseudoID", "total_check_ans_counts"]
+new_df = new_df.merge(check_ans_counts, on="PseudoID", how="left")
+new_df["total_check_ans_counts"].fillna(0, inplace=True)
+
+# 計算 total_check_ans_time
+check_ans_time = (
+    combined_df.drop_duplicates(subset=["exam_video_exam_sn"])
+    .groupby("PseudoID")["exam_ans_time"]
+    .sum()
+    .reset_index()
+)
+check_ans_time.columns = ["PseudoID", "total_check_ans_time"]
+new_df = new_df.merge(check_ans_time, on="PseudoID", how="left")
+new_df["total_check_ans_time"].fillna(0, inplace=True)
+
+# 計算 total_check_ans_result
+check_ans_result = (
+    combined_df.drop_duplicates(subset=["exam_video_exam_sn"])
+    .groupby("PseudoID")["exam_binary_res"]
+    .sum()
+    .reset_index()
+)
+check_ans_result.columns = ["PseudoID", "total_check_ans_result"]
+new_df = new_df.merge(check_ans_result, on="PseudoID", how="left")
+new_df["total_check_ans_result"].fillna(0, inplace=True)
+
+# 計算 check_correct_ratio
+new_df["check_correct_ratio"] = (
+    new_df["total_check_ans_result"] / new_df["total_check_ans_counts"]
+)
+new_df["check_correct_ratio"] = new_df["check_correct_ratio"].fillna(0) * 100
+
+# 計算 avg_check_ans_time
+new_df["avg_check_ans_time"] = (
+    new_df["total_check_ans_time"] / new_df["total_check_ans_counts"]
+)
 new_df["avg_check_ans_time"] = new_df["avg_check_ans_time"].fillna(0)
 
-# 将 new_df 输出为 CSV 文件
-new_df.to_csv("output.csv", index=False)
+# 以前的代碼保持不變...
+
+
+op_counts = (
+    combined_df.drop_duplicates(subset=["review_sn", "record_plus_sn"])
+    .groupby("PseudoID")
+    .size()
+    .reset_index(name="total_op_counts")
+)
+new_df = new_df.merge(op_counts, on="PseudoID", how="left")
+
+
+# 计算 avg_op_counts
+new_df["avg_op_counts"] = new_df["total_op_counts"] / new_df["total_reviewed_count"]
+
+
+# 定義一個函數來計算特定動作的次數
+def calculate_action_count(combined_df, action):
+    action_df = combined_df[combined_df["record_plus_view_action"] == action]
+    action_count = (
+        action_df.drop_duplicates(subset=["review_sn", "record_plus_sn"])
+        .groupby("PseudoID")
+        .size()
+        .reset_index(name=f"total_{action}")
+    )
+    return action_count
+
+
+# 計算 play, paused, end, normal, slowdown, speedup, chkptstart, chkptend, continue, note, dragleft, dragright, dragstart, browse, replay, fuscreenoff, fuscreenon 的次數
+for action in [
+    "play",
+    "paused",
+    "end",
+    "normal",
+    "slowdown",
+    "speedup",
+    "chkptstart",
+    "chkptend",
+    "continue",
+    "note",
+    "dragleft",
+    "dragright",
+    "dragstart",
+    "browse",
+    "replay",
+    "fuscreenoff",
+    "fuscreenon",
+]:
+    action_count = calculate_action_count(combined_df, action)
+    new_df = new_df.merge(action_count, on="PseudoID", how="left").fillna(0)
+
+
+# 儲存 new_df 為CSV
+new_df.to_csv("clean.csv", index=False)
